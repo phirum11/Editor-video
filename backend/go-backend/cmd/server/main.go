@@ -47,6 +47,14 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+func repeatChar(ch rune, count int) string {
+	s := make([]rune, count)
+	for i := range s {
+		s[i] = ch
+	}
+	return string(s)
+}
+
 func main() {
 	cfg := loadConfig()
 
@@ -102,11 +110,48 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("🚀 AI Studio backend starting on :%s (mode=%s)", cfg.Port, cfg.GinMode)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server start failed: %v", err)
 		}
 	}()
+
+	// Print startup banner
+	lines := []struct{ label, value string }{
+		{"Local:", fmt.Sprintf("http://localhost:%s", cfg.Port)},
+		{"API:", fmt.Sprintf("http://localhost:%s/api/v1", cfg.Port)},
+		{"Health:", fmt.Sprintf("http://localhost:%s/health", cfg.Port)},
+		{"WS:", fmt.Sprintf("ws://localhost:%s/ws", cfg.Port)},
+		{"Mode:", cfg.GinMode},
+		{"Redis:", cfg.RedisAddr},
+	}
+	svcLines := []struct{ label, value string }{
+		{"Frontend:", "http://localhost:3000"},
+		{"Video Proc:", "http://localhost:8001"},
+		{"Speech-to-Text:", "http://localhost:8002"},
+		{"Text-to-Speech:", "http://localhost:8003"},
+	}
+
+	w := 55 // inner width
+	border := fmt.Sprintf("  ╔%s╗", repeatChar('═', w))
+	mid := fmt.Sprintf("  ╠%s╣", repeatChar('═', w))
+	bottom := fmt.Sprintf("  ╚%s╝", repeatChar('═', w))
+
+	fmt.Println()
+	fmt.Println(border)
+	fmt.Printf("  ║%-*s║\n", w, "       🚀 AI Studio Backend is running!")
+	fmt.Println(mid)
+	for _, l := range lines {
+		content := fmt.Sprintf("   %-10s %s", l.label, l.value)
+		fmt.Printf("  ║%-*s║\n", w, content)
+	}
+	fmt.Println(mid)
+	fmt.Printf("  ║%-*s║\n", w, "   Services:")
+	for _, s := range svcLines {
+		content := fmt.Sprintf("   %-17s %s", s.label, s.value)
+		fmt.Printf("  ║%-*s║\n", w, content)
+	}
+	fmt.Println(bottom)
+	fmt.Println()
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
