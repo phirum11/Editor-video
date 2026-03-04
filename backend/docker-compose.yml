@@ -1,0 +1,70 @@
+﻿version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - aistudio-network
+
+  speech-to-text:
+    build: ./python-services/speech_to_text
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./temp:/app/temp
+    networks:
+      - aistudio-network
+    depends_on:
+      - redis
+
+  text-to-speech:
+    build: ./python-services/text_to_speech
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./temp:/app/temp
+    networks:
+      - aistudio-network
+    depends_on:
+      - redis
+
+  video-processor:
+    build: ./python-services/video_processor
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./temp:/app/temp
+    networks:
+      - aistudio-network
+    depends_on:
+      - redis
+
+  go-backend:
+    build: ./go-backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./temp:/root/temp
+    environment:
+      - REDIS_ADDR=redis:6379
+      - PYTHON_SERVICE_STT=http://speech-to-text:8000
+      - PYTHON_SERVICE_TTS=http://text-to-speech:8002
+      - PYTHON_SERVICE_VIDEO=http://video-processor:8003
+    networks:
+      - aistudio-network
+    depends_on:
+      - redis
+      - speech-to-text
+      - text-to-speech
+      - video-processor
+
+networks:
+  aistudio-network:
+    driver: bridge
+
+volumes:
+  redis_data:

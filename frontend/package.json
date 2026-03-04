@@ -1,0 +1,43 @@
+{
+  "name": "ai-studio-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Professional AI-powered audio and video processing suite",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@react-oauth/google": "^0.13.4",
+    "@reduxjs/toolkit": "^2.5.0",
+    "axios": "^1.7.9",
+    "jwt-decode": "^4.0.0",
+    "lucide-react": "^0.576.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-dropzone": "^15.0.0",
+    "react-hot-toast": "^2.6.0",
+    "react-icons": "^5.4.0",
+    "react-redux": "^9.2.0",
+    "react-router-dom": "^7.1.0",
+    "recharts": "^3.7.0",
+    "wavesurfer.js": "^7.8.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "globals": "^15.14.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "vite": "^6.0.0"
+  }
+}

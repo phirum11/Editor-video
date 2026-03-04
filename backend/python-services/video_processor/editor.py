@@ -1,0 +1,425 @@
+"""
+Video Editor Core Module — FFmpeg-based pipeline with GPU detection,
+hardware-accelerated encoding, filter-graph chaining, and streaming progress.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _has_nvidia() -> bool:
+    """Check for NVENC support."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "h264_nvenc" in r.stdout
+    except Exception:
+        return False
+
+HAS_GPU = _has_nvidia()
+FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+FFPROBE = shutil.which("ffprobe") or "ffprobe"
+
+
+@dataclass
+class ProbeInfo:
+    """Parsed ffprobe result for a media file."""
+    duration: float = 0.0
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    bitrate: int = 0
+    codec: str = ""
+    audio_codec: str = ""
+    has_audio: bool = False
+    file_size: int = 0
+
+
+def probe(path: str) -> ProbeInfo:
+    """Run ffprobe and return structured info."""
+    cmd = [
+        FFPROBE, "-v", "quiet",
+        "-print_format", "json",
+        "-show_format", "-show_streams",
+        path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {r.stderr[:500]}")
+
+    data = json.loads(r.stdout)
+    info = ProbeInfo()
+
+    fmt = data.get("format", {})
+    info.duration = float(fmt.get("duration", 0))
+    info.bitrate = int(fmt.get("bit_rate", 0))
+    info.file_size = int(fmt.get("size", 0))
+
+    for stream in data.get("streams", []):
+        if stream["codec_type"] == "video" and not info.codec:
+            info.codec = stream.get("codec_name", "")
+            info.width = int(stream.get("width", 0))
+            info.height = int(stream.get("height", 0))
+            r_frame_rate = stream.get("r_frame_rate", "30/1")
+            try:
+                num, den = r_frame_rate.split("/")
+                info.fps = round(int(num) / max(int(den), 1), 2)
+            except (ValueError, ZeroDivisionError):
+                info.fps = 30.0
+        elif stream["codec_type"] == "audio" and not info.audio_codec:
+            info.audio_codec = stream.get("codec_name", "")
+            info.has_audio = True
+
+    return info
+
+
+# ─── Operation Data ───────────────────────────────────────────────────────────
+
+@dataclass
+class EditOp:
+    """A single editing operation."""
+    type: str
+    params: Dict = field(default_factory=dict)
+
+
+# ─── VideoEditor ──────────────────────────────────────────────────────────────
+
+class VideoEditor:
+    """
+    Builds an FFmpeg command from a chain of editing operations.
+    Uses a single ffmpeg invocation with complex filter graphs for efficiency.
+    """
+
+    def __init__(self):
+        self.input_path: Optional[str] = None
+        self._info: Optional[ProbeInfo] = None
+        self._filters: List[str] = []
+        self._audio_filters: List[str] = []
+        self._pre_input_args: List[str] = []
+        self._post_input_args: List[str] = []
+        self._trim_start: Optional[float] = None
+        self._trim_end: Optional[float] = None
+        self._speed_factor: float = 1.0
+        self._target_fps: Optional[int] = None
+        self._target_width: Optional[int] = None
+        self._target_height: Optional[int] = None
+
+    # ── Load ──────────────────────────────────────────────
+
+    def load_video(self, path: str) -> "VideoEditor":
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Video not found: {path}")
+        self.input_path = path
+        self._info = probe(path)
+        return self
+
+    @property
+    def info(self) -> ProbeInfo:
+        if not self._info:
+            raise RuntimeError("No video loaded")
+        return self._info
+
+    # ── Operations ────────────────────────────────────────
+
+    def trim(self, start: float, end: float) -> "VideoEditor":
+        if start < 0:
+            start = 0
+        if end <= start:
+            raise ValueError("trim end must be > start")
+        self._trim_start = start
+        self._trim_end = end
+        return self
+
+    def resize(self, width: Optional[int] = None, height: Optional[int] = None) -> "VideoEditor":
+        if width and width > 0:
+            self._target_width = width if width % 2 == 0 else width + 1
+        if height and height > 0:
+            self._target_height = height if height % 2 == 0 else height + 1
+        if self._target_width and not self._target_height:
+            self._filters.append(f"scale={self._target_width}:-2")
+        elif self._target_height and not self._target_width:
+            self._filters.append(f"scale=-2:{self._target_height}")
+        elif self._target_width and self._target_height:
+            self._filters.append(f"scale={self._target_width}:{self._target_height}")
+        return self
+
+    def change_speed(self, factor: float) -> "VideoEditor":
+        factor = max(0.25, min(factor, 4.0))
+        self._speed_factor = factor
+        self._filters.append(f"setpts={1.0/factor}*PTS")
+        if self.info.has_audio:
+            self._audio_filters.append(f"atempo={factor}")
+        return self
+
+    def rotate(self, angle: float) -> "VideoEditor":
+        angle = angle % 360
+        if angle == 90:
+            self._filters.append("transpose=1")
+        elif angle == 180:
+            self._filters.append("transpose=1,transpose=1")
+        elif angle == 270:
+            self._filters.append("transpose=2")
+        elif angle != 0:
+            rad = angle * 3.14159265 / 180
+            self._filters.append(f"rotate={rad:.6f}:fillcolor=black")
+        return self
+
+    def flip_horizontal(self) -> "VideoEditor":
+        self._filters.append("hflip")
+        return self
+
+    def flip_vertical(self) -> "VideoEditor":
+        self._filters.append("vflip")
+        return self
+
+    def crop(self, x: int, y: int, w: int, h: int) -> "VideoEditor":
+        w = w if w % 2 == 0 else w - 1
+        h = h if h % 2 == 0 else h - 1
+        self._filters.append(f"crop={w}:{h}:{x}:{y}")
+        return self
+
+    def brightness(self, value: float) -> "VideoEditor":
+        """value in [-1.0, 1.0]"""
+        self._filters.append(f"eq=brightness={max(-1.0, min(1.0, value))}")
+        return self
+
+    def contrast(self, value: float) -> "VideoEditor":
+        """value in [0.0, 3.0], 1.0 = normal"""
+        self._filters.append(f"eq=contrast={max(0.0, min(3.0, value))}")
+        return self
+
+    def saturation(self, value: float) -> "VideoEditor":
+        """value in [0.0, 3.0], 1.0 = normal"""
+        self._filters.append(f"eq=saturation={max(0.0, min(3.0, value))}")
+        return self
+
+    def blur(self, strength: int = 5) -> "VideoEditor":
+        s = max(1, min(strength, 20))
+        self._filters.append(f"boxblur={s}:{s}")
+        return self
+
+    def sharpen(self, strength: float = 1.0) -> "VideoEditor":
+        amt = max(0.0, min(strength, 5.0))
+        self._filters.append(f"unsharp=5:5:{amt}:5:5:{amt}")
+        return self
+
+    def denoise(self, strength: int = 5) -> "VideoEditor":
+        s = max(1, min(strength, 15))
+        self._filters.append(f"nlmeans={s}:7:5:3:3")
+        return self
+
+    def stabilize(self) -> "VideoEditor":
+        # Two-pass stabilisation (vidstab)
+        self._filters.append("vidstabdetect=shakiness=5:accuracy=15")
+        return self
+
+    def set_fps(self, fps: int) -> "VideoEditor":
+        self._target_fps = max(1, min(fps, 120))
+        self._filters.append(f"fps={self._target_fps}")
+        return self
+
+    def fade_in(self, duration: float = 1.0) -> "VideoEditor":
+        self._filters.append(f"fade=in:st=0:d={duration}")
+        if self.info.has_audio:
+            self._audio_filters.append(f"afade=in:st=0:d={duration}")
+        return self
+
+    def fade_out(self, duration: float = 1.0) -> "VideoEditor":
+        end = (self._trim_end or self.info.duration) - duration
+        self._filters.append(f"fade=out:st={max(0, end)}:d={duration}")
+        if self.info.has_audio:
+            self._audio_filters.append(f"afade=out:st={max(0, end)}:d={duration}")
+        return self
+
+    def text_overlay(self, text: str, x: str = "(w-tw)/2", y: str = "h-60",
+                     font_size: int = 24, color: str = "white",
+                     start: float = 0, end: float = 0) -> "VideoEditor":
+        escaped = text.replace("'", "\\'").replace(":", "\\:")
+        f = (
+            f"drawtext=text='{escaped}':fontsize={font_size}:fontcolor={color}"
+            f":x={x}:y={y}"
+        )
+        if end > start:
+            f += f":enable='between(t,{start},{end})'"
+        self._filters.append(f)
+        return self
+
+    # ── Build & Execute ───────────────────────────────────
+
+    def _build_encoder_args(self, codec: str = "h264",
+                            quality: str = "high") -> List[str]:
+        crf_map = {"low": "28", "medium": "23", "high": "18", "lossless": "0"}
+        crf = crf_map.get(quality, "20")
+
+        if codec == "h264":
+            if HAS_GPU:
+                return ["-c:v", "h264_nvenc", "-preset", "p4",
+                        "-rc", "vbr", "-cq", crf, "-b:v", "0"]
+            return ["-c:v", "libx264", "-preset", "medium",
+                    "-crf", crf, "-pix_fmt", "yuv420p"]
+        elif codec == "h265":
+            if HAS_GPU:
+                return ["-c:v", "hevc_nvenc", "-preset", "p4",
+                        "-rc", "vbr", "-cq", crf, "-b:v", "0"]
+            return ["-c:v", "libx265", "-preset", "medium",
+                    "-crf", crf, "-pix_fmt", "yuv420p"]
+        elif codec == "vp9":
+            return ["-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0",
+                    "-row-mt", "1"]
+        elif codec == "av1":
+            return ["-c:v", "libaom-av1", "-crf", crf, "-b:v", "0",
+                    "-cpu-used", "4"]
+        else:
+            return ["-c:v", "libx264", "-crf", crf, "-pix_fmt", "yuv420p"]
+
+    def build_command(self, output_path: str, codec: str = "h264",
+                      quality: str = "high") -> List[str]:
+        """Assemble the full ffmpeg command."""
+        cmd: List[str] = [FFMPEG, "-hide_banner", "-y"]
+
+        # Thread count
+        cpu_count = os.cpu_count() or 4
+        cmd += ["-threads", str(min(cpu_count, 16))]
+
+        # Seek before input for efficiency
+        if self._trim_start is not None:
+            cmd += ["-ss", str(self._trim_start)]
+        cmd += ["-i", self.input_path]
+        if self._trim_end is not None:
+            dur = self._trim_end - (self._trim_start or 0)
+            cmd += ["-t", str(dur)]
+
+        # Video filters
+        if self._filters:
+            cmd += ["-vf", ",".join(self._filters)]
+
+        # Audio filters
+        if self._audio_filters:
+            cmd += ["-af", ",".join(self._audio_filters)]
+
+        # Encoder
+        cmd += self._build_encoder_args(codec, quality)
+
+        # Audio encoder
+        if self.info.has_audio:
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-an"]
+
+        # FPS override
+        if self._target_fps:
+            cmd += ["-r", str(self._target_fps)]
+
+        # Movflags for streaming-friendly output
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in (".mp4", ".m4v", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+
+        cmd += ["-progress", "pipe:1", output_path]
+        return cmd
+
+    async def save(self, output_path: str, codec: str = "h264",
+                   quality: str = "high",
+                   on_progress=None) -> str:
+        """
+        Run ffmpeg asynchronously, parsing progress from stdout.
+        on_progress(percent: int, speed: str) is called periodically.
+        """
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        cmd = self.build_command(output_path, codec, quality)
+        logger.info("FFmpeg cmd: %s", " ".join(cmd))
+
+        total_duration = (
+            (self._trim_end or self.info.duration)
+            - (self._trim_start or 0)
+        ) / self._speed_factor
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        time_re = re.compile(r"out_time_us=(\d+)")
+        speed_re = re.compile(r"speed=\s*([\d.]+x)")
+
+        last_pct = 0
+        current_speed = "0x"
+
+        async for line in proc.stdout:
+            text = line.decode("utf-8", errors="replace").strip()
+            m = time_re.search(text)
+            if m and total_duration > 0:
+                us = int(m.group(1))
+                pct = min(int((us / 1_000_000) / total_duration * 100), 99)
+                if pct > last_pct:
+                    last_pct = pct
+                    sm = speed_re.search(text)
+                    if sm:
+                        current_speed = sm.group(1)
+                    if on_progress:
+                        await on_progress(pct, current_speed)
+
+        await proc.wait()
+        if proc.returncode != 0:
+            stderr = (await proc.stderr.read()).decode()[:1000]
+            raise RuntimeError(f"FFmpeg failed (rc={proc.returncode}): {stderr}")
+
+        if on_progress:
+            await on_progress(100, current_speed)
+
+        return output_path
+
+    # ── Convenience: apply ops from dicts ─────────────────
+
+    def apply_operations(self, operations: List[Dict]) -> "VideoEditor":
+        """Apply a list of operation dicts (from the API)."""
+        for op in operations:
+            op_type = op.get("type", "")
+            params = op.get("params", {})
+
+            handler = {
+                "trim": lambda p: self.trim(p.get("start", 0), p.get("end", self.info.duration)),
+                "resize": lambda p: self.resize(p.get("width"), p.get("height")),
+                "speed": lambda p: self.change_speed(p.get("factor", 1.0)),
+                "rotate": lambda p: self.rotate(p.get("angle", 0)),
+                "rotate_left": lambda p: self.rotate(270),
+                "rotate_right": lambda p: self.rotate(90),
+                "flip_h": lambda p: self.flip_horizontal(),
+                "flip_v": lambda p: self.flip_vertical(),
+                "crop": lambda p: self.crop(p.get("x", 0), p.get("y", 0), p.get("w", 1920), p.get("h", 1080)),
+                "brightness": lambda p: self.brightness(p.get("value", 0)),
+                "contrast": lambda p: self.contrast(p.get("value", 1.0)),
+                "saturation": lambda p: self.saturation(p.get("value", 1.0)),
+                "blur": lambda p: self.blur(p.get("strength", 5)),
+                "sharpen": lambda p: self.sharpen(p.get("strength", 1.0)),
+                "denoise": lambda p: self.denoise(p.get("strength", 5)),
+                "stabilize": lambda p: self.stabilize(),
+                "fps": lambda p: self.set_fps(p.get("fps", 30)),
+                "fade_in": lambda p: self.fade_in(p.get("duration", 1.0)),
+                "fade_out": lambda p: self.fade_out(p.get("duration", 1.0)),
+                "text": lambda p: self.text_overlay(
+                    p.get("text", ""), p.get("x", "(w-tw)/2"), p.get("y", "h-60"),
+                    p.get("font_size", 24), p.get("color", "white"),
+                    p.get("start", 0), p.get("end", 0),
+                ),
+            }.get(op_type)
+
+            if handler:
+                handler(params)
+            else:
+                logger.warning("Unknown operation: %s", op_type)
+
+        return self
