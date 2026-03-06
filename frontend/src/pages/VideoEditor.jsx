@@ -136,7 +136,12 @@ const VideoEditor = () => {
     bassBoost: 0,
     trebleBoost: 0,
     compression: false,
-    volume: 100
+    volume: 100,
+    // Slow + Reverb effect
+    slowReverb: false,
+    slowAmount: 0.85, // 0.5 to 1.0 (playback speed)
+    reverbMix: 30, // 0 to 100 (wet/dry mix percentage)
+    reverbDecay: 50 // 0 to 100 (reverb tail length)
   });
 
   const fileInputRef = useRef(null);
@@ -1852,6 +1857,92 @@ const VideoEditor = () => {
                     }
                     className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-blue"
                   />
+                </div>
+
+                {/* Slow + Reverb Effect */}
+                <div className="p-2 bg-gradient-to-r from-purple-900/30 to-blue-900/30 rounded-lg border border-purple-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] text-purple-300 font-medium">
+                      🎵 Slow + Reverb
+                    </p>
+                    <input
+                      type="checkbox"
+                      checked={audioEnhancement.slowReverb}
+                      onChange={(e) =>
+                        setAudioEnhancement((prev) => ({
+                          ...prev,
+                          slowReverb: e.target.checked
+                        }))
+                      }
+                      className="w-4 h-4 text-purple-600 bg-gray-700 border-gray-600 rounded focus:ring-purple-500"
+                    />
+                  </div>
+
+                  {audioEnhancement.slowReverb && (
+                    <>
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">
+                          Slow Amount:{' '}
+                          {Math.round(audioEnhancement.slowAmount * 100)}%
+                        </label>
+                        <input
+                          type="range"
+                          min="0.5"
+                          max="1"
+                          step="0.05"
+                          value={audioEnhancement.slowAmount}
+                          onChange={(e) =>
+                            setAudioEnhancement((prev) => ({
+                              ...prev,
+                              slowAmount: Number(e.target.value)
+                            }))
+                          }
+                          className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple"
+                        />
+                        <p className="text-[9px] text-gray-500 mt-0.5">
+                          Lower = slower playback
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">
+                          Reverb Mix: {audioEnhancement.reverbMix}%
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={audioEnhancement.reverbMix}
+                          onChange={(e) =>
+                            setAudioEnhancement((prev) => ({
+                              ...prev,
+                              reverbMix: Number(e.target.value)
+                            }))
+                          }
+                          className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">
+                          Reverb Decay: {audioEnhancement.reverbDecay}%
+                        </label>
+                        <input
+                          type="range"
+                          min="10"
+                          max="100"
+                          value={audioEnhancement.reverbDecay}
+                          onChange={(e) =>
+                            setAudioEnhancement((prev) => ({
+                              ...prev,
+                              reverbDecay: Number(e.target.value)
+                            }))
+                          }
+                          className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple"
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="p-2 bg-blue-600/10 rounded-lg border border-blue-500/20">

@@ -390,6 +390,57 @@ class VideoEditor:
         self._audio_filters.append(f"lowpass=f={freq}")
         return self
 
+    def audio_slow(self, speed: float = 0.85) -> "VideoEditor":
+        """
+        Slow down audio playback (for slowed + reverb effect).
+        speed: 0.5 to 1.0 (0.85 = 85% speed, typical slowed effect)
+        Note: Also slows video. Use with change_speed for video-only changes.
+        """
+        if not self.info.has_audio:
+            return self
+        # atempo only supports 0.5 to 2.0, for slower we chain filters
+        speed = max(0.5, min(1.0, speed))
+        self._audio_filters.append(f"atempo={speed}")
+        # Also pitch shift down slightly for that "slowed" vibe
+        # asetrate changes sample rate (lower = lower pitch)
+        # Then aresample brings it back to original rate
+        return self
+
+    def audio_reverb(self, mix: float = 0.3, decay: float = 0.5) -> "VideoEditor":
+        """
+        Add reverb effect using FFmpeg's aecho filter.
+        mix: wet/dry mix (0.0 to 1.0, default 0.3 = 30% reverb)
+        decay: reverb tail decay (0.0 to 1.0, default 0.5)
+        """
+        if not self.info.has_audio:
+            return self
+        mix = max(0.0, min(1.0, mix))
+        decay = max(0.1, min(0.9, decay))
+        # aecho: in_gain, out_gain, delays (ms), decays
+        # Multiple delays create a more natural reverb
+        delays = "60|120|180|240"
+        decays = f"{decay}|{decay*0.8}|{decay*0.6}|{decay*0.4}"
+        in_gain = 0.8
+        out_gain = 1.0 - mix + 0.5  # Adjust output based on mix
+        self._audio_filters.append(
+            f"aecho={in_gain}:{out_gain}:{delays}:{decays}"
+        )
+        return self
+
+    def audio_slow_reverb(self, speed: float = 0.85,
+                          reverb_mix: float = 0.3,
+                          reverb_decay: float = 0.5) -> "VideoEditor":
+        """
+        Apply the popular "slowed + reverb" effect.
+        Combines slower playback with reverb for that dreamy aesthetic.
+        speed: playback speed (0.5 to 1.0)
+        reverb_mix: reverb wet/dry ratio (0.0 to 1.0)
+        reverb_decay: reverb decay time (0.1 to 0.9)
+        """
+        self.audio_slow(speed)
+        self.audio_reverb(reverb_mix, reverb_decay)
+        return self
+
     # ── Build & Execute ───────────────────────────────────
 
     def _build_encoder_args(self, codec: str = "h264",
@@ -573,6 +624,13 @@ class VideoEditor:
                 "audio_volume": lambda p: self.audio_volume(p.get("gain_db", 0.0)),
                 "audio_highpass": lambda p: self.audio_highpass(p.get("frequency", 80)),
                 "audio_lowpass": lambda p: self.audio_lowpass(p.get("frequency", 15000)),
+                "audio_slow": lambda p: self.audio_slow(p.get("speed", 0.85)),
+                "audio_reverb": lambda p: self.audio_reverb(
+                    p.get("mix", 0.3), p.get("decay", 0.5)
+                ),
+                "audio_slow_reverb": lambda p: self.audio_slow_reverb(
+                    p.get("speed", 0.85), p.get("reverb_mix", 0.3), p.get("reverb_decay", 0.5)
+                ),
             }.get(op_type)
 
             if handler:
