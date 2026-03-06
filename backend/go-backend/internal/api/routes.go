@@ -158,6 +158,20 @@ func SetupRoutes(
 	limiter := newRateLimiter(100, time.Second)
 	r.Use(limiter.middleware())
 
+	// ─── Root endpoint ─────────────────────────────────────
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"service":     "AI Studio Go Backend",
+			"version":     "2.0.0",
+			"status":      "running",
+			"docs":        "/api/*",
+			"health":      "/health",
+			"websocket":   "/ws",
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+			"message":     "API server is running. Use /health for status or /api/* for endpoints.",
+		})
+	})
+
 	// ─── Auth endpoints ────────────────────────────────────
 	auth := r.Group("/api/auth")
 	{
