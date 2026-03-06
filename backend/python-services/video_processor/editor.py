@@ -115,6 +115,7 @@ class VideoEditor:
         self._target_fps: Optional[int] = None
         self._target_width: Optional[int] = None
         self._target_height: Optional[int] = None
+        self._complex_filter: Optional[str] = None
 
     # ── Load ──────────────────────────────────────────────
 
@@ -256,6 +257,139 @@ class VideoEditor:
         self._filters.append(f)
         return self
 
+    # ── Region Blur ───────────────────────────────────────
+
+    def blur_region(self, x: int, y: int, w: int, h: int,
+                    strength: int = 20) -> "VideoEditor":
+        """
+        Apply blur to a specific region of the video.
+        Uses split/crop/boxblur/overlay filter chain.
+        x, y: top-left corner (pixels)
+        w, h: width and height (pixels)
+        strength: blur strength (default 20)
+        """
+        # Ensure even dimensions
+        w = w if w % 2 == 0 else w + 1
+        h = h if h % 2 == 0 else h + 1
+        s = max(1, min(strength, 50))
+
+        # Complex filter: crop region, blur it, overlay back
+        filter_chain = (
+            f"[0:v]split=2[base][blur];"
+            f"[blur]crop={w}:{h}:{x}:{y},boxblur={s}:{s}[blurred];"
+            f"[base][blurred]overlay={x}:{y}"
+        )
+        # Note: This replaces all video filters for complex filter graphs
+        self._complex_filter = filter_chain
+        return self
+
+    # ── Audio Enhancement ─────────────────────────────────
+
+    def audio_normalize(self, target_loudness: float = -14.0,
+                       loudness_range: float = 7.0) -> "VideoEditor":
+        """
+        Normalize audio using EBU R128 loudnorm filter.
+        target_loudness: target integrated loudness (LUFS), default -14
+        loudness_range: target loudness range (LU), default 7
+        """
+        if not self.info.has_audio:
+            return self
+        self._audio_filters.append(
+            f"loudnorm=I={target_loudness}:LRA={loudness_range}:TP=-1.5"
+        )
+        return self
+
+    def audio_denoise(self, strength: float = 0.3) -> "VideoEditor":
+        """
+        Apply noise reduction using anlmdn filter (non-local means denoising).
+        strength: 0.0 to 1.0 (higher = more aggressive)
+        """
+        if not self.info.has_audio:
+            return self
+        # anlmdn parameters: s=noise strength (default 0.00001), m=search radius
+        # Higher strength = more denoising but may affect audio quality
+        s = max(0.00001, min(strength, 1.0)) * 0.01
+        self._audio_filters.append(f"anlmdn=s={s:.6f}:p=0.002:o=1")
+        return self
+
+    def audio_bass_boost(self, gain_db: float = 6.0,
+                         frequency: int = 100) -> "VideoEditor":
+        """
+        Boost bass frequencies.
+        gain_db: gain in dB (positive to boost, negative to cut)
+        frequency: center frequency in Hz (default 100)
+        """
+        if not self.info.has_audio:
+            return self
+        gain = max(-20, min(20, gain_db))
+        freq = max(20, min(200, frequency))
+        self._audio_filters.append(f"equalizer=f={freq}:t=h:w=100:g={gain}")
+        return self
+
+    def audio_treble_boost(self, gain_db: float = 6.0,
+                           frequency: int = 3000) -> "VideoEditor":
+        """
+        Boost treble frequencies.
+        gain_db: gain in dB (positive to boost, negative to cut)
+        frequency: center frequency in Hz (default 3000)
+        """
+        if not self.info.has_audio:
+            return self
+        gain = max(-20, min(20, gain_db))
+        freq = max(1000, min(16000, frequency))
+        self._audio_filters.append(f"equalizer=f={freq}:t=h:w=2000:g={gain}")
+        return self
+
+    def audio_compression(self, threshold_db: float = -20,
+                          ratio: float = 4.0) -> "VideoEditor":
+        """
+        Apply dynamic range compression.
+        threshold_db: threshold level in dB
+        ratio: compression ratio (e.g., 4.0 = 4:1)
+        """
+        if not self.info.has_audio:
+            return self
+        # acompressor filter
+        threshold = max(-60, min(0, threshold_db))
+        rat = max(1, min(20, ratio))
+        self._audio_filters.append(
+            f"acompressor=threshold={threshold}dB:ratio={rat}:attack=5:release=50"
+        )
+        return self
+
+    def audio_volume(self, gain_db: float = 0.0) -> "VideoEditor":
+        """
+        Adjust overall volume.
+        gain_db: gain in dB (e.g., 6 = double volume, -6 = half volume)
+        """
+        if not self.info.has_audio:
+            return self
+        gain = max(-30, min(30, gain_db))
+        self._audio_filters.append(f"volume={gain}dB")
+        return self
+
+    def audio_highpass(self, frequency: int = 80) -> "VideoEditor":
+        """
+        Apply highpass filter to remove low-frequency rumble.
+        frequency: cutoff frequency in Hz (default 80)
+        """
+        if not self.info.has_audio:
+            return self
+        freq = max(20, min(500, frequency))
+        self._audio_filters.append(f"highpass=f={freq}")
+        return self
+
+    def audio_lowpass(self, frequency: int = 15000) -> "VideoEditor":
+        """
+        Apply lowpass filter to remove high-frequency noise.
+        frequency: cutoff frequency in Hz (default 15000)
+        """
+        if not self.info.has_audio:
+            return self
+        freq = max(1000, min(20000, frequency))
+        self._audio_filters.append(f"lowpass=f={freq}")
+        return self
+
     # ── Build & Execute ───────────────────────────────────
 
     def _build_encoder_args(self, codec: str = "h264",
@@ -301,8 +435,11 @@ class VideoEditor:
             dur = self._trim_end - (self._trim_start or 0)
             cmd += ["-t", str(dur)]
 
-        # Video filters
-        if self._filters:
+        # Complex filter (for region blur etc) takes precedence
+        if self._complex_filter:
+            cmd += ["-filter_complex", self._complex_filter]
+        elif self._filters:
+            # Simple video filters
             cmd += ["-vf", ",".join(self._filters)]
 
         # Audio filters
@@ -404,6 +541,10 @@ class VideoEditor:
                 "contrast": lambda p: self.contrast(p.get("value", 1.0)),
                 "saturation": lambda p: self.saturation(p.get("value", 1.0)),
                 "blur": lambda p: self.blur(p.get("strength", 5)),
+                "blur_region": lambda p: self.blur_region(
+                    p.get("x", 0), p.get("y", 0), p.get("w", 100), p.get("h", 100),
+                    p.get("strength", 20)
+                ),
                 "sharpen": lambda p: self.sharpen(p.get("strength", 1.0)),
                 "denoise": lambda p: self.denoise(p.get("strength", 5)),
                 "stabilize": lambda p: self.stabilize(),
@@ -415,6 +556,23 @@ class VideoEditor:
                     p.get("font_size", 24), p.get("color", "white"),
                     p.get("start", 0), p.get("end", 0),
                 ),
+                # Audio enhancement operations
+                "audio_normalize": lambda p: self.audio_normalize(
+                    p.get("target_loudness", -14.0), p.get("loudness_range", 7.0)
+                ),
+                "audio_denoise": lambda p: self.audio_denoise(p.get("strength", 0.3)),
+                "audio_bass_boost": lambda p: self.audio_bass_boost(
+                    p.get("gain_db", 6.0), p.get("frequency", 100)
+                ),
+                "audio_treble_boost": lambda p: self.audio_treble_boost(
+                    p.get("gain_db", 6.0), p.get("frequency", 3000)
+                ),
+                "audio_compression": lambda p: self.audio_compression(
+                    p.get("threshold_db", -20), p.get("ratio", 4.0)
+                ),
+                "audio_volume": lambda p: self.audio_volume(p.get("gain_db", 0.0)),
+                "audio_highpass": lambda p: self.audio_highpass(p.get("frequency", 80)),
+                "audio_lowpass": lambda p: self.audio_lowpass(p.get("frequency", 15000)),
             }.get(op_type)
 
             if handler:

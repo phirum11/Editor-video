@@ -24,6 +24,7 @@ const VideoPreview = ({
   isMuted = false,
   playbackRate = 1,
   isLooping = false,
+  effects = null,
   onPlay,
   onPause,
   onSeek,
@@ -261,6 +262,24 @@ const VideoPreview = ({
   const progress =
     actualDuration > 0 ? (currentTime / actualDuration) * 100 : 0;
 
+  // Build CSS filter string from effects
+  const cssFilter = effects
+    ? [
+        effects.brightness !== 0 &&
+          `brightness(${1 + effects.brightness / 100})`,
+        effects.contrast !== 0 && `contrast(${1 + effects.contrast / 100})`,
+        effects.saturation !== 0 && `saturate(${1 + effects.saturation / 100})`,
+        effects.hue !== 0 && `hue-rotate(${effects.hue * 1.8}deg)`,
+        effects.temperature !== 0 &&
+          `sepia(${Math.abs(effects.temperature) / 100})`,
+        effects.blur > 0 && `blur(${effects.blur}px)`,
+        effects.sharpen > 0 && `contrast(${1 + effects.sharpen / 50})`
+      ]
+        .filter(Boolean)
+        .join(' ') || 'none'
+    : 'none';
+  const cssOpacity = effects ? effects.opacity / 100 : 1;
+
   return (
     <div
       ref={containerRef}
@@ -297,7 +316,9 @@ const VideoPreview = ({
             zoom !== 1
               ? `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`
               : 'translateZ(0)',
-          willChange: 'transform',
+          filter: cssFilter,
+          opacity: cssOpacity,
+          willChange: 'transform, filter, opacity',
           cursor: zoom > 1 ? (isDragging ? 'grabbing' : 'grab') : 'pointer'
         }}
         onMouseDown={handlePanStart}
